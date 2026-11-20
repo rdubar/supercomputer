@@ -1,0 +1,421 @@
+#!/usr/bin/env python3
+"""supercomputer — retro mainframe front panel for the Pi.
+
+Read-only: it only reads /proc, /sys, findmnt and `systemctl is-active`.
+The blinking lamps are decorative, but how many are lit follows the real
+load (per-core CPU, per-disk I/O, network traffic).
+
+  supercomputer            full-screen front panel (q quits, c changes colour)
+  supercomputer --banner   short static banner for SSH logins
+"""
+import curses
+import os
+import random
+import subprocess
+import sys
+import time
+
+HOST = os.uname().nodename.upper()
+SERVICES = [("PLEX", "plexmediaserver"), ("SMB", "smbd"),
+            ("XMIT", "transmission-daemon"), ("VNC", "wayvnc"),
+            ("TSNET", "tailscaled")]
+THEMES = ["AMBER", "GREEN", "CYAN"]
+
+
+# ---------------------------------------------------------------- readers
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def cpu_times():
+    out = {}
+    for line in read("/proc/stat").splitlines():
+        if line.startswith("cpu") and line[3:4].isdigit():
+            parts = line.split()
+            vals = list(map(int, parts[1:]))
+            idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
+            out[parts[0]] = (sum(vals), idle)
+    return out
+
+
+def disk_map():
+    """[(label, kernel disk name, mountpoint)] for / and /mnt/media1-4."""
+    disks = []
+    try:
+        res = subprocess.run(["findmnt", "-rn", "-o", "TARGET,SOURCE"],
+                             capture_output=True, text=True, timeout=3)
+        rows = dict(l.split(" ", 1) for l in res.stdout.splitlines() if " " in l)
+    except Exception:
+        rows = {}
+    wanted = [("SYS", "/")] + [(f"MED{i}", f"/mnt/media{i}") for i in range(1, 5)]
+    for label, mnt in wanted:
+        src = rows.get(mnt, "")
+        dev = os.path.basename(src).rstrip("0123456789") if src.startswith("/dev/sd") else ""
+        disks.append((label, dev, mnt))
+    return disks
+
+
+def disk_sectors():
+    out = {}
+    for line in read("/proc/diskstats").splitlines():
+        p = line.split()
+        if len(p) >= 10:
+            out[p[2]] = (int(p[5]), int(p[9]))  # sectors read, written
+    return out
+
+
+def net_bytes():
+    rx = tx = 0
+    for line in read("/proc/net/dev").splitlines()[2:]:
+        name, data = line.split(":", 1)
+        if name.strip() in ("eth0", "wlan0"):
+            v = data.split()
+            rx += int(v[0])
+            tx += int(v[8])
+    return rx, tx
+
+
+def meminfo():
+    m = {}
+    for line in read("/proc/meminfo").splitlines():
+        k, v = line.split(":", 1)
+        m[k] = int(v.split()[0])
+    return m.get("MemTotal", 1), m.get("MemAvailable", 0)
+
+
+def temp_c():
+    try:
+        return int(read("/sys/class/thermal/thermal_zone0/temp", "0")) / 1000
+    except ValueError:
+        return 0.0
+
+
+def uptime_str():
+    try:
+        s = int(float(read("/proc/uptime", "0").split()[0]))
+    except ValueError:
+        s = 0
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    return f"{d}D {h:02d}H {s // 60:02d}M"
+
+
+def disk_usage(mnt):
+    try:
+        st = os.statvfs(mnt)
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        return total, (1 - free / total) if total else 0
+    except OSError:
+        return 0, 0
+
+
+def service_states():
+    names = [s for _, s in SERVICES]
+    try:
+        res = subprocess.run(["systemctl", "is-active", *names],
+                             capture_output=True, text=True, timeout=3)
+        states = res.stdout.split()
+    except Exception:
+        states = []
+    states += ["unknown"] * (len(names) - len(states))
+    return dict(zip(names, states))
+
+
+def human(n):
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+
+
+# ---------------------------------------------------------------- sampler
+class Sampler:
+    def __init__(self):
+        self.disks = disk_map()
+        self.prev_cpu = cpu_times()
+        self.prev_disk = disk_sectors()
+        self.prev_net = net_bytes()
+        self.prev_t = time.monotonic()
+        self.cpu = {k: 0.0 for k in self.prev_cpu}
+        self.dio = {d: (0.0, 0.0) for _, d, _ in self.disks}
+        self.net = (0.0, 0.0)
+        self.services = service_states()
+        self.usage = {m: disk_usage(m) for _, _, m in self.disks}
+        self.tick = 0
+
+    def update(self):
+        now = time.monotonic()
+        dt = max(now - self.prev_t, 1e-3)
+        cur = cpu_times()
+        for k, (tot, idle) in cur.items():
+            pt, pi = self.prev_cpu.get(k, (tot, idle))
+            dtot = tot - pt
+            self.cpu[k] = 0.0 if dtot <= 0 else 1 - (idle - pi) / dtot
+        self.prev_cpu = cur
+        ds = disk_sectors()
+        for _, d, _ in self.disks:
+            r, w = ds.get(d, (0, 0))
+            pr, pw = self.prev_disk.get(d, (r, w))
+            self.dio[d] = ((r - pr) * 512 / dt, (w - pw) * 512 / dt)
+        self.prev_disk = ds
+        rx, tx = net_bytes()
+        prx, ptx = self.prev_net
+        self.net = ((rx - prx) / dt, (tx - ptx) / dt)
+        self.prev_net = (rx, tx)
+        self.prev_t = now
+        self.tick += 1
+        if self.tick % 5 == 0:
+            self.services = service_states()
+        if self.tick % 30 == 0:
+            self.usage = {m: disk_usage(m) for _, _, m in self.disks}
+
+
+def rate_level(bps, full=150e6):
+    """Map bytes/s to 0..1 on a log-ish scale so small activity still shows."""
+    if bps <= 0:
+        return 0.0
+    import math
+    return min(1.0, math.log10(1 + bps) / math.log10(1 + full))
+
+
+# ---------------------------------------------------------------- drawing
+class Panel:
+    def __init__(self, scr):
+        self.scr = scr
+        self.theme = 0
+        self.s = Sampler()
+        self.log = []
+        self.last_log = 0
+        self.lamps = {}
+        curses.curs_set(0)
+        scr.nodelay(True)
+        curses.start_color()
+        self.bg = curses.COLOR_BLACK  # force a black CRT background
+        self.set_theme()
+        self.say(f"{HOST} COLD START COMPLETE. ALL UNITS NOMINAL.")
+
+    def set_theme(self):
+        bright = {0: curses.COLOR_YELLOW, 1: curses.COLOR_GREEN, 2: curses.COLOR_CYAN}[self.theme]
+        curses.init_pair(1, bright, self.bg)                # main
+        curses.init_pair(2, curses.COLOR_RED, self.bg)      # warning / lamp on hot
+        curses.init_pair(3, curses.COLOR_WHITE, self.bg)    # dim / labels
+        curses.init_pair(4, curses.COLOR_BLACK, bright)     # inverse header
+        self.MAIN = curses.color_pair(1) | curses.A_BOLD
+        self.DIM = curses.color_pair(1) | curses.A_DIM
+        self.WARN = curses.color_pair(2) | curses.A_BOLD
+        self.LABEL = curses.color_pair(3)
+        self.HEAD = curses.color_pair(4) | curses.A_BOLD
+
+    def say(self, msg):
+        stamp = time.strftime("%H:%M:%S")
+        self.log.append(f"{stamp}  {msg}")
+        self.log = self.log[-50:]
+
+    def put(self, y, x, text, attr=0):
+        h, w = self.scr.getmaxyx()
+        if 0 <= y < h and x < w:
+            try:
+                self.scr.addstr(y, x, text[: max(0, w - x - 1)], attr)
+            except curses.error:
+                pass
+
+    def lamp_row(self, y, x, key, n, level, slow=False):
+        """Row of n lamps; roughly level*n lit, shuffled each refresh."""
+        bits = self.lamps.get(key)
+        if bits is None or len(bits) != n or not slow or random.random() < 0.3:
+            lit = level * n
+            bits = [random.random() < (lit / n) * (0.6 + 0.8 * random.random()) for _ in range(n)]
+            self.lamps[key] = bits
+        for i, on in enumerate(bits):
+            gap = 1 if (i + 1) % 4 == 0 else 0
+            self.put(y, x, "●" if on else "·", self.MAIN if on else self.DIM)
+            x += 2 + gap
+        return x
+
+    def bar(self, y, x, width, frac, warn_at=0.9):
+        filled = int(round(frac * width))
+        attr = self.WARN if frac >= warn_at else self.MAIN
+        self.put(y, x, " " * filled, attr | curses.A_REVERSE)
+        self.put(y, x + filled, "·" * (width - filled), self.DIM)
+
+    def box(self, y, x, h, w, title):
+        self.put(y, x, "╔" + "═" * (w - 2) + "╗", self.DIM)
+        for i in range(1, h - 1):
+            self.put(y + i, x, "║", self.DIM)
+            self.put(y + i, x + w - 1, "║", self.DIM)
+        self.put(y + h - 1, x, "╚" + "═" * (w - 2) + "╝", self.DIM)
+        self.put(y, x + 2, f" {title} ", self.MAIN)
+
+    def events(self):
+        s = self.s
+        if time.monotonic() - self.last_log < 4:
+            return
+        busy = [(lbl, r, w) for lbl, d, _ in s.disks for r, w in [s.dio.get(d, (0, 0))]
+                if r + w > 5e6]
+        msgs = []
+        for lbl, r, w in busy:
+            msgs.append(f"STORAGE UNIT {lbl}: CHANNEL ACTIVE  R {human(r)}/S  W {human(w)}/S")
+        avg = sum(s.cpu.values()) / max(len(s.cpu), 1)
+        if avg > 0.6:
+            msgs.append(f"VECTOR PIPELINE AT {avg * 100:.0f}% — ALL PROCESSORS ENGAGED")
+        if s.net[0] + s.net[1] > 2e6:
+            msgs.append(f"DATA LINK: RX {human(s.net[0])}/S  TX {human(s.net[1])}/S")
+        down = [n for n, u in SERVICES if s.services.get(u) not in ("active", "unknown")]
+        for n in down:
+            msgs.append(f"*** SUBSYSTEM {n} OFFLINE — OPERATOR ATTENTION ***")
+        if not msgs and random.random() < 0.15:
+            msgs.append(random.choice([
+                "PARITY CHECK OK. CORE MEMORY CONSISTENT.",
+                "SCHEDULER IDLE. AWAITING JOB SUBMISSION.",
+                f"COOLANT LOOP NOMINAL. CORE {temp_c():.1f} C.",
+                "TAPE LIBRARY STANDING BY.",
+                "OPERATOR CONSOLE ONLINE.",
+            ]))
+        for m in msgs[:2]:
+            self.say(m)
+        if msgs:
+            self.last_log = time.monotonic()
+
+    def draw(self):
+        s = self.s
+        scr = self.scr
+        scr.bkgd(" ", curses.color_pair(1))
+        scr.erase()
+        h, w = scr.getmaxyx()
+        if h < 24 or w < 70:
+            self.put(0, 0, "ENLARGE OPERATOR CONSOLE TO 70x24", self.WARN)
+            scr.refresh()
+            return
+        W = min(w - 1, 100)
+        title = f" {HOST} · BCM2712 VECTOR PROCESSING SYSTEM · SERIAL 2CCF678D90D0 "
+        self.put(0, 0, title.center(W), self.HEAD)
+
+        tm, ta = meminfo()
+        t = temp_c()
+        self.put(1, 1, f"UPTIME {uptime_str()}", self.MAIN)
+        self.put(1, 24, f"CORE MEMORY {tm // 1024:,} MW", self.MAIN)
+        self.put(1, 48, "COOLANT ", self.LABEL)
+        self.put(1, 56, f"{t:5.1f} C", self.WARN if t > 75 else self.MAIN)
+        self.put(1, 68, time.strftime("%H:%M:%S"), self.MAIN)
+
+        # Processors
+        y = 3
+        cpus = sorted((k for k in s.cpu), key=lambda k: int(k[3:]))
+        self.box(y, 0, len(cpus) + 2, W, "CENTRAL PROCESSORS")
+        for i, k in enumerate(cpus):
+            lvl = s.cpu[k]
+            self.put(y + 1 + i, 2, f"CPU {i}", self.LABEL)
+            end = self.lamp_row(y + 1 + i, 9, k, 24, lvl)
+            self.put(y + 1 + i, end + 1, f"{lvl * 100:5.1f}%", self.WARN if lvl > 0.9 else self.MAIN)
+        y += len(cpus) + 2
+
+        # Memory
+        used = 1 - ta / tm
+        self.box(y, 0, 3, W, "CORE STORAGE")
+        self.put(y + 1, 2, "MEM", self.LABEL)
+        self.bar(y + 1, 9, 40, used)
+        self.put(y + 1, 51, f"{used * 100:4.1f}%  {human((tm - ta) * 1024)} OF {human(tm * 1024)}", self.MAIN)
+        y += 3
+
+        # Storage
+        self.box(y, 0, len(s.disks) + 2, W, "MASS STORAGE UNITS")
+        for i, (lbl, dev, mnt) in enumerate(s.disks):
+            r, wr = s.dio.get(dev, (0, 0))
+            total, frac = s.usage.get(mnt, (0, 0))
+            row = y + 1 + i
+            self.put(row, 2, f"{lbl:5}", self.LABEL)
+            if not dev:
+                self.put(row, 9, "UNIT OFFLINE", self.WARN)
+                continue
+            self.put(row, 9, "R", self.LABEL)
+            self.lamp_row(row, 11, dev + "r", 4, rate_level(r))
+            self.put(row, 21, "W", self.LABEL)
+            self.lamp_row(row, 23, dev + "w", 4, rate_level(wr))
+            self.bar(row, 34, 20, frac)
+            self.put(row, 56, f"{frac * 100:3.0f}% OF {human(total):>6}", self.MAIN)
+            self.put(row, 73, f"{human(r + wr):>7}/S", self.MAIN if r + wr > 1e6 else self.DIM)
+        y += len(s.disks) + 2
+
+        # Network + subsystems
+        self.box(y, 0, 3, W, "DATA LINK / SUBSYSTEMS")
+        rx, tx = s.net
+        self.put(y + 1, 2, "RX", self.LABEL)
+        self.lamp_row(y + 1, 5, "rx", 4, rate_level(rx, 100e6))
+        self.put(y + 1, 14, "TX", self.LABEL)
+        self.lamp_row(y + 1, 17, "tx", 4, rate_level(tx, 100e6))
+        x = 28
+        for name, unit in SERVICES:
+            ok = s.services.get(unit) == "active"
+            self.put(y + 1, x, "■" if ok else "□", self.MAIN if ok else self.WARN)
+            self.put(y + 1, x + 2, name, self.MAIN if ok else self.WARN)
+            x += len(name) + 4
+        y += 3
+
+        # Teletype log
+        room = h - y - 3
+        if room > 0:
+            self.box(y, 0, room + 2, W, "OPERATOR LOG")
+            for i, line in enumerate(self.log[-room:]):
+                attr = self.WARN if "***" in line else self.MAIN
+                self.put(y + 1 + i, 2, line[: W - 4], attr)
+
+        footer = f"[Q] HALT CONSOLE   [C] PHOSPHOR: {THEMES[self.theme]}"
+        self.put(h - 1, 0, footer, self.DIM)
+        scr.refresh()
+
+    def run(self):
+        next_sample = time.monotonic() + 1
+        while True:
+            key = self.scr.getch()
+            if key in (ord("q"), ord("Q"), 27):
+                return
+            if key in (ord("c"), ord("C")):
+                self.theme = (self.theme + 1) % len(THEMES)
+                self.set_theme()
+            if time.monotonic() >= next_sample:
+                self.s.update()
+                self.events()
+                next_sample += 1
+            self.draw()
+            time.sleep(0.2)
+
+
+# ---------------------------------------------------------------- banner
+def banner():
+    A, D, R = "\033[1;33m", "\033[2;33m", "\033[0m"
+    tm, ta = meminfo()
+    load = read("/proc/loadavg", "0 0 0").split()[:3]
+    st = service_states()
+    svc = "  ".join(f"{'■' if st.get(u) == 'active' else '□'} {n}" for n, u in SERVICES)
+    lamps = "".join(random.choice("●·") for _ in range(32))
+    lines = [
+        f"{D}╔{'═' * 62}╗{R}",
+        f"{D}║{R}{A}{('  ' + HOST + ' · BCM2712 VECTOR PROCESSING SYSTEM').ljust(62)}{R}{D}║{R}",
+        f"{D}║{R}{A}  {lamps}{' ' * 28}{R}{D}║{R}",
+        f"{D}╚{'═' * 62}╝{R}",
+        f"{A}  UPTIME {uptime_str()}   LOAD {' '.join(load)}   COOLANT {temp_c():.1f} C{R}",
+        f"{A}  CORE MEMORY {(tm - ta) // 1024:,} / {tm // 1024:,} MW   {svc}{R}",
+        f"{D}  TYPE 'supercomputer' FOR THE OPERATOR CONSOLE{R}",
+        "",
+    ]
+    print("\n".join(lines))
+
+
+def main():
+    if "--banner" in sys.argv:
+        banner()
+        return
+    os.environ.setdefault("ESCDELAY", "25")
+    curses.wrapper(lambda scr: Panel(scr).run())
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
