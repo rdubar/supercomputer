@@ -5,7 +5,8 @@ Read-only: it only reads /proc, /sys, findmnt and `systemctl is-active`.
 The blinking lamps are decorative, but how many are lit follows the real
 load (per-core CPU, per-disk I/O, network traffic).
 
-  supercomputer            full-screen front panel (q quits, c changes colour)
+  supercomputer            full-screen front panel (h for help)
+  supercomputer --green    start in a given colour (--amber, --green, --cyan)
   supercomputer --banner   short static banner for SSH logins
 """
 import curses
@@ -20,6 +21,28 @@ SERVICES = [("PLEX", "plexmediaserver"), ("SMB", "smbd"),
             ("XMIT", "transmission-daemon"), ("VNC", "wayvnc"),
             ("TSNET", "tailscaled")]
 THEMES = ["AMBER", "GREEN", "CYAN"]
+THEME_FILE = os.path.expanduser("~/.config/supercomputer/theme")
+CLK_TCK = os.sysconf("SC_CLK_TCK")
+
+
+def load_theme():
+    for i, name in enumerate(THEMES):
+        if f"--{name.lower()}" in sys.argv:
+            return i
+    try:
+        with open(THEME_FILE) as f:
+            return THEMES.index(f.read().strip().upper())
+    except (OSError, ValueError):
+        return 0
+
+
+def save_theme(i):
+    try:
+        os.makedirs(os.path.dirname(THEME_FILE), exist_ok=True)
+        with open(THEME_FILE, "w") as f:
+            f.write(THEMES[i] + "\n")
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- readers
@@ -39,6 +62,24 @@ def cpu_times():
             vals = list(map(int, parts[1:]))
             idle = vals[3] + (vals[4] if len(vals) > 4 else 0)
             out[parts[0]] = (sum(vals), idle)
+    return out
+
+
+def proc_ticks():
+    """{pid: (name, utime+stime ticks)} for every process."""
+    out = {}
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        data = read(f"/proc/{pid}/stat")
+        if not data:
+            continue
+        try:
+            name = data[data.index("(") + 1: data.rindex(")")]
+            fields = data[data.rindex(")") + 2:].split()
+            out[int(pid)] = (name, int(fields[11]) + int(fields[12]))
+        except (ValueError, IndexError):
+            continue
     return out
 
 
@@ -146,7 +187,26 @@ class Sampler:
         self.net = (0.0, 0.0)
         self.services = service_states()
         self.usage = {m: disk_usage(m) for _, _, m in self.disks}
+        self.prev_proc = proc_ticks()
+        self.prev_proc_t = time.monotonic()
+        self.jobs = []
         self.tick = 0
+
+    def update_jobs(self):
+        """Busiest processes since the last scan, as (pid, name, cpu%)."""
+        now = time.monotonic()
+        dt = max(now - self.prev_proc_t, 1e-3)
+        cur = proc_ticks()
+        jobs = []
+        for pid, (name, ticks) in cur.items():
+            prev = self.prev_proc.get(pid)
+            if prev and prev[0] == name:
+                pct = (ticks - prev[1]) / CLK_TCK / dt * 100
+                if pct >= 0.5:
+                    jobs.append((pid, name, pct))
+        jobs.sort(key=lambda j: -j[2])
+        self.jobs = jobs[:8]
+        self.prev_proc, self.prev_proc_t = cur, now
 
     def update(self):
         now = time.monotonic()
@@ -171,6 +231,8 @@ class Sampler:
         self.tick += 1
         if self.tick % 5 == 0:
             self.services = service_states()
+        if self.tick % 3 == 0:
+            self.update_jobs()
         if self.tick % 30 == 0:
             self.usage = {m: disk_usage(m) for _, _, m in self.disks}
 
@@ -187,7 +249,9 @@ def rate_level(bps, full=150e6):
 class Panel:
     def __init__(self, scr):
         self.scr = scr
-        self.theme = 0
+        self.theme = load_theme()
+        self.paused = False
+        self.help = False
         self.s = Sampler()
         self.log = []
         self.last_log = 0
@@ -356,6 +420,22 @@ class Panel:
             x += len(name) + 4
         y += 3
 
+        # Active jobs (only when there is room to keep 3 log lines)
+        njobs = min(5, h - y - 3 - 2 - 5)
+        if njobs > 0:
+            self.box(y, 0, njobs + 2, W, "ACTIVE JOBS")
+            jobs = s.jobs[:njobs]
+            if not jobs:
+                self.put(y + 1, 2, "NO JOBS IN EXECUTION", self.DIM)
+            for i, (pid, name, pct) in enumerate(jobs):
+                row = y + 1 + i
+                self.put(row, 2, f"JOB {pid:>7}", self.LABEL)
+                self.put(row, 15, f"{name.upper()[:16]:16}", self.MAIN)
+                self.lamp_row(row, 33, f"job{i}", 16, min(pct / 100, 1.0))
+                self.put(row, 33 + 16 * 2 + 4, f"{pct:6.1f}%",
+                         self.WARN if pct > 90 else self.MAIN)
+            y += njobs + 2
+
         # Teletype log
         room = h - y - 3
         if room > 0:
@@ -364,24 +444,59 @@ class Panel:
                 attr = self.WARN if "***" in line else self.MAIN
                 self.put(y + 1 + i, 2, line[: W - 4], attr)
 
-        footer = f"[Q] HALT CONSOLE   [C] PHOSPHOR: {THEMES[self.theme]}"
-        self.put(h - 1, 0, footer, self.DIM)
+        footer = f"[H] HELP   [C] PHOSPHOR: {THEMES[self.theme]}   [Q] HALT CONSOLE"
+        if self.paused:
+            footer += "   *** FROZEN — [P] TO RESUME ***"
+        self.put(h - 1, 0, footer, self.WARN if self.paused else self.DIM)
+        if self.help:
+            self.draw_help(h, W)
         scr.refresh()
+
+    def draw_help(self, h, W):
+        lines = [
+            "OPERATOR CONTROLS",
+            "",
+            "  C        CHANGE PHOSPHOR (AMBER / GREEN / CYAN)",
+            "  P        FREEZE / RESUME THE PANEL",
+            "  H  ?     SHOW / HIDE THIS CARD",
+            "  Q  ESC   HALT CONSOLE",
+            "",
+            "LAMP DENSITY FOLLOWS REAL LOAD. COLOUR IS REMEMBERED.",
+            "START IN A COLOUR WITH --AMBER, --GREEN OR --CYAN.",
+        ]
+        bw = max(len(l) for l in lines) + 6
+        bh = len(lines) + 2
+        y0, x0 = max(0, (h - bh) // 2), max(0, (W - bw) // 2)
+        for i in range(bh):
+            self.put(y0 + i, x0, " " * bw, self.MAIN)
+        self.box(y0, x0, bh, bw, "HELP")
+        for i, l in enumerate(lines):
+            self.put(y0 + 1 + i, x0 + 3, l, self.MAIN if i == 0 else self.LABEL)
 
     def run(self):
         next_sample = time.monotonic() + 1
         while True:
             key = self.scr.getch()
             if key in (ord("q"), ord("Q"), 27):
-                return
+                if self.help and key == 27:
+                    self.help = False
+                else:
+                    return
             if key in (ord("c"), ord("C")):
                 self.theme = (self.theme + 1) % len(THEMES)
                 self.set_theme()
+                save_theme(self.theme)
+            if key in (ord("h"), ord("H"), ord("?")):
+                self.help = not self.help
+            if key in (ord("p"), ord("P"), ord(" ")):
+                self.paused = not self.paused
+                self.say("PANEL FROZEN BY OPERATOR." if self.paused else "PANEL RESUMED.")
             if time.monotonic() >= next_sample:
                 self.s.update()
                 self.events()
-                next_sample += 1
-            self.draw()
+                next_sample = max(next_sample + 1, time.monotonic())
+            if not self.paused or key != -1:
+                self.draw()
             time.sleep(0.2)
 
 
