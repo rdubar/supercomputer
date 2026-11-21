@@ -85,10 +85,16 @@ uv tool install supercomputer-console
 pipx install supercomputer-console
 ```
 
+On a Mac (or Linux) with Homebrew, without setting up Python yourself:
+
+```sh
+brew install rdubar/tap/supercomputer
+```
+
 For the wallpaper generator, include the extra:
 `uv tool install "supercomputer-console[wallpaper]"`.
 
-Plans for Homebrew, single-binary builds and an iOS pocket console are in
+Plans for single-binary builds and an iOS pocket console are in
 the [roadmap](https://github.com/rdubar/supercomputer/blob/main/ROADMAP.md). Changes are listed in the [changelog](https://github.com/rdubar/supercomputer/blob/main/CHANGELOG.md).
 
 ## Use

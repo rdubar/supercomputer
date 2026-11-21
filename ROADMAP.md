@@ -25,7 +25,7 @@ Status: in progress.
 - [x] **Publish to PyPI** as `supercomputer-console` (`supercomputer` is taken),
       so `pipx install supercomputer-console` or
       `uv tool install supercomputer-console` works anywhere
-- [ ] **Homebrew tap** (`rdubar/homebrew-tap`), so
+- [x] **Homebrew tap** (`rdubar/homebrew-tap`), so
       `brew install rdubar/tap/supercomputer` works with no Python setup
 - [x] Tag releases on GitHub, with notes taken from `CHANGELOG.md`
 - [ ] Small polish: re-announce an alarm when it goes from warning to
