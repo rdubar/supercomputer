@@ -1,22 +1,25 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "supercomputer"
-version = "1.2.0"
+name = "supercomputer-console"
+dynamic = ["version"]
 description = "A retro mainframe operator console for your terminal: blinkenlights driven by real system load."
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Roger Dubar" }]
 requires-python = ">=3.9"
 dependencies = []
+keywords = ["terminal", "curses", "retro", "blinkenlights", "system-monitor", "raspberry-pi", "macos"]
 classifiers = [
+    "Development Status :: 4 - Beta",
     "Environment :: Console :: Curses",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
     "Topic :: System :: Monitoring",
 ]
 
@@ -25,6 +28,9 @@ wallpaper = ["Pillow>=9.1"]
 
 [project.urls]
 Homepage = "https://github.com/rdubar/supercomputer"
+Changelog = "https://github.com/rdubar/supercomputer/blob/main/CHANGELOG.md"
+Roadmap = "https://github.com/rdubar/supercomputer/blob/main/ROADMAP.md"
+Issues = "https://github.com/rdubar/supercomputer/issues"
 
 [project.scripts]
 supercomputer = "supercomputer:main"
@@ -32,3 +38,6 @@ supercomputer-wallpaper = "supercomputer_wallpaper:main"
 
 [tool.setuptools]
 py-modules = ["supercomputer", "supercomputer_wallpaper"]
+
+[tool.setuptools.dynamic]
+version = { attr = "supercomputer.__version__" }
