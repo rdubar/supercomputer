@@ -21,12 +21,13 @@ Status: in progress.
 
 - [x] Linux and macOS backends, standard library only
 - [x] Strain alarms, `--check`, `--notify`, `--demo`
-- [ ] **Publish to PyPI** as `supercomputer-console` (`supercomputer` is taken),
+- [x] `--update`, and `--version` checks for a newer release
+- [x] **Publish to PyPI** as `supercomputer-console` (`supercomputer` is taken),
       so `pipx install supercomputer-console` or
       `uv tool install supercomputer-console` works anywhere
 - [ ] **Homebrew tap** (`rdubar/homebrew-tap`), so
       `brew install rdubar/tap/supercomputer` works with no Python setup
-- [ ] Tag releases on GitHub, with notes taken from `CHANGELOG.md`
+- [x] Tag releases on GitHub, with notes taken from `CHANGELOG.md`
 - [ ] Small polish: re-announce an alarm when it goes from warning to
       critical; show the version in the footer even on narrow terminals
 

@@ -25,7 +25,7 @@ uvx --from dist/*.whl supercomputer --version
 ## 3. Publish
 
 ```sh
-uv publish                             # uses UV_PUBLISH_TOKEN, or prompts
+uvx twine upload dist/*              # reads ~/.pypirc (uv publish does not)
 ```
 
 To try it on TestPyPI first:
