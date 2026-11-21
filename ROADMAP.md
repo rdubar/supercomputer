@@ -10,14 +10,14 @@ These hold for every release:
 - **Read-only.** It watches and never changes anything on the machine.
 - **Unprivileged.** No root, no setuid, no kernel modules.
 - **Light.** It must never be the thing that strains the machine.
-- **No runtime dependencies** beyond what the OS ships (Python 1.x), or a
-  single static binary (Go 2.x).
+- **No runtime dependencies** beyond Python's standard library. (A Go
+  version, if it ever happens, would be a single static binary.)
 - **The look is the point.** New features have to stay in character: lamps,
   tape drives, teletype and operator language.
 
 ## 1.x: Python, easy to install
 
-Status: in progress.
+Status: done, and maintained. This is the current version.
 
 - [x] Linux and macOS backends, standard library only
 - [x] Strain alarms, `--check`, `--notify`, `--demo`
@@ -30,24 +30,31 @@ Status: in progress.
 - [x] Tag releases on GitHub, with notes taken from `CHANGELOG.md`
 - [x] Re-announce an alarm when it goes from warning to critical
 
-## 2.0: Go rewrite, single binary
+## Parked: a Go version
 
-Status: planned. It starts when 1.x is stable, or when the iOS work needs
-it.
+Status: possible later, not planned.
 
-Why: the Python version needs a Python interpreter. On a Mac without
-Apple's developer tools, typing `python3` brings up an install prompt rather
-than running anything. A Go build is one file per platform, cross-compiled
-from one machine.
+A Go rewrite was the original 2.0 plan, so the console could be one file
+per platform with no Python needed. Homebrew and PyPI have since solved
+most of that: `brew install rdubar/tap/supercomputer` and
+`uv tool install supercomputer-console` both work without setting up Python
+first. What's left doesn't justify rewriting the system readings and the
+curses front panel, and then keeping two versions in step.
 
-- Same look, keys, alarms and command-line options. 2.0 should feel identical.
-- GoReleaser builds macOS (arm64, amd64) and Linux (arm64, amd64) binaries
-  for every tag, updates the Homebrew tap automatically, and attaches `.deb`
-  and `.rpm` packages to GitHub releases.
-- The Python 1.x line keeps getting fixes until 2.0 matches it feature for
-  feature.
+It comes back if one of these happens:
 
-## 3.0: pocket console (iOS)
+- **The pocket console goes ahead.** `--serve` is a long-running network
+  service, which suits Go. It would start as a small Go server on its own,
+  with the console moving over only if that goes well.
+- **Size or start-up time becomes a real complaint.** For example, the
+  Homebrew install pulls in a full Python for a 100 KB program.
+
+If it happens, the plan stays the same: same look, keys, alarms and options;
+GoReleaser builds for macOS and Linux (arm64 and amd64), updating the
+Homebrew tap and attaching `.deb` and `.rpm` files to releases; the Python
+version keeps getting fixes until Go matches it.
+
+## Later: pocket console (iOS)
 
 Status: idea.
 
@@ -65,15 +72,15 @@ better idea is a **remote console**:
 
 Open questions: whether push goes through a small relay service or the
 phone polls; authentication (Tailscale identity is a strong candidate);
-whether `--serve` belongs in the Python or the Go version (probably Go,
-since it's a long-running service).
+whether `--serve` is written in Python or is where a Go version starts
+(see above).
 
 ## Not planned
 
-- **An official Debian/Ubuntu package or apt repository.** `.deb` files on
-  GitHub releases (2.0) cover this without the upkeep.
+- **An official Debian/Ubuntu package or apt repository.** PyPI covers Linux
+  today, and a Go version would attach `.deb` files to releases.
 - **Getting into Homebrew's main catalogue.** It requires a popular
   project. Our own tap does the job until then.
-- **Windows support.** Possible in 2.0 through Go, but not a goal.
+- **Windows support.** Possible with a Go version, but not a goal.
 - **Being a full monitor.** Use `htop`, `btop` or Glances for that.
   supercomputer is ambience with useful warnings.
