@@ -6,6 +6,13 @@ All notable changes to this project. Versions follow
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-21
+
+- An alarm that goes from warning to critical is announced again: logged as
+  `ESCALATED TO CRITICAL` in the console (and rings `--bell`), and sent as a
+  notification by `--check --notify`. Easing back to a warning is logged but
+  not notified. Before, escalation was silent.
+
 ## [1.3.1] - 2026-11-21
 
 - `--update` recognises a Homebrew install and runs

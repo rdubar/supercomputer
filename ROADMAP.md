@@ -28,8 +28,7 @@ Status: in progress.
 - [x] **Homebrew tap** (`rdubar/homebrew-tap`), so
       `brew install rdubar/tap/supercomputer` works with no Python setup
 - [x] Tag releases on GitHub, with notes taken from `CHANGELOG.md`
-- [ ] Small polish: re-announce an alarm when it goes from warning to
-      critical; show the version in the footer even on narrow terminals
+- [x] Re-announce an alarm when it goes from warning to critical
 
 ## 2.0: Go rewrite, single binary
 

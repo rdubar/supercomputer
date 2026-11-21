@@ -136,7 +136,8 @@ supercomputer-wallpaper out.png --size 2560x1440
 | Disks | 95% full | 98% full |
 | Services | a subsystem lamp's service stops | |
 
-`--bell` makes the console ring the terminal bell on a new alarm.
+`--bell` makes the console ring the terminal bell on a new alarm, or when
+a warning becomes critical.
 
 ### Seeing it in action
 
@@ -158,8 +159,8 @@ Reading a large file (`cat bigfile > /dev/null`) lights the storage lamps.
 
 `supercomputer --check` takes about a second, mostly spent waiting, so it is
 cheap to run on a timer. Add `--notify` for a desktop notification
-(`osascript` on macOS, `notify-send` on Linux). It notifies only when the set
-of alarms changes, not on every run, and remembers the last state in
+(`osascript` on macOS, `notify-send` on Linux). It notifies when an alarm is
+raised, escalates from warning to critical, or all clear, not on every run, and remembers the last state in
 `~/.cache/supercomputer/alarms`. Add `--quiet` to print nothing while all is
 well (with `--notify`, also while nothing has changed). For example, a crontab line:
 

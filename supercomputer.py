@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-__version__ = "1.3.1"
+__version__ = "1.3.2"
 REPO_URL = "github.com/rdubar/supercomputer"
 PYPI_NAME = "supercomputer-console"
 PYPI_URL = f"https://pypi.org/pypi/{PYPI_NAME}/json"
@@ -399,6 +399,13 @@ def make_probe():
 WARN, CRIT = 1, 2
 
 
+def raised(alarms, before):
+    """Alarms that are new or worse than in `before` ({key: level}), as
+    [(level, key, text, escalated)]. warning -> critical counts as raised."""
+    return [(lvl, key, text, key in before) for lvl, key, text in alarms
+            if lvl > before.get(key, 0)]
+
+
 def assess(probe, swap_rate=None, cpu_pinned=False):
     """Current alarms as [(level, key, text)]. Cheap: a few reads, no sleeping.
 
@@ -695,14 +702,17 @@ class Panel:
     # ------------------------------------------------------------ events
     def alarm_events(self):
         current = {key: (lvl, text) for lvl, key, text in self.s.alarms}
-        for key, (lvl, text) in current.items():
-            if key not in self.known_alarms:
-                self.say(f"*** {'CRITICAL' if lvl == CRIT else 'ALARM'}: {text} ***")
-                if self.bell:
-                    curses.beep()
-        for key, (_, text) in self.known_alarms.items():
+        before = {key: lvl for key, (lvl, _) in self.known_alarms.items()}
+        for lvl, key, text, escalated in raised(self.s.alarms, before):
+            tag = "ESCALATED TO CRITICAL" if escalated else ("CRITICAL" if lvl == CRIT else "ALARM")
+            self.say(f"*** {tag}: {text} ***")
+            if self.bell:
+                curses.beep()
+        for key, (lvl, text) in self.known_alarms.items():
             if key not in current:
                 self.say(f"ALARM CLEARED: {text}")
+            elif current[key][0] < lvl:
+                self.say(f"ALARM EASED: {current[key][1]}")
         self.known_alarms = current
 
     def events(self):
@@ -990,9 +1000,14 @@ def check(probe, do_notify=False, quiet=False):
     busy = [1 - (cpu1[k][1] - cpu0[k][1]) / max(cpu1[k][0] - cpu0[k][0], 1) for k in cpu1 if k in cpu0]
     alarms = assess(probe, swap_rate, bool(busy) and min(busy) > 0.98)
     host = identity(probe)[0]
-    keys = sorted(k for _, k, _ in alarms)
-    before = read(STATE_FILE).split()
-    changed = keys != before
+    # State file: "key:level" per alarm. A bare "key" (written before 1.3.2)
+    # counts as a warning, so upgrading doesn't re-announce it.
+    now = {k: lvl for lvl, k, _ in alarms}
+    before = {}
+    for entry in read(STATE_FILE).split():
+        m = re.fullmatch(r"(.+):([12])", entry)
+        before[m[1] if m else entry] = int(m[2]) if m else WARN
+    changed = now != before
     # --quiet: silent when nominal; with --notify, also silent while unchanged
     if not quiet or (alarms and not do_notify) or (do_notify and changed):
         A, R = ("\033[1;33m", "\033[0m") if sys.stdout.isatty() else ("", "")
@@ -1003,7 +1018,7 @@ def check(probe, do_notify=False, quiet=False):
         print("\n".join(lines))
     if do_notify:
         if changed:
-            new = [t for _, k, t in alarms if k not in before]
+            new = [("ESCALATED: " if esc else "") + t for _, _, t, esc in raised(alarms, before)]
             if new:
                 notify(f"{host} SUPERCOMPUTER ALARM", "; ".join(new))
             elif not alarms:
@@ -1011,7 +1026,7 @@ def check(probe, do_notify=False, quiet=False):
             try:
                 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
                 with open(STATE_FILE, "w") as f:
-                    f.write(" ".join(keys) + "\n")
+                    f.write(" ".join(f"{k}:{lvl}" for k, lvl in sorted(now.items())) + "\n")
             except OSError:
                 pass
     return max((lvl for lvl, _, _ in alarms), default=0)
