@@ -99,10 +99,15 @@ supercomputer --green    # start in a colour: --amber, --green or --cyan
 supercomputer --banner   # short static banner (with any alarms), then exit
 supercomputer --demo     # simulated load and alarms, for showing off
 supercomputer --check    # one-shot strain check; exit 0 nominal, 1 alarm, 2 critical
-supercomputer --version  # also shown bottom right of the console
+supercomputer --version  # version (also bottom right of the console) + quick update check
+supercomputer --update   # upgrade, using uv, pipx, pip in a venv, or git pull in a clone
 supercomputer-wallpaper  # writes ~/Pictures/wallpapers/supercomputer.png
 supercomputer-wallpaper out.png --size 2560x1440
 ```
+
+`--version` asks PyPI whether a newer release exists, but gives up after
+1.5 seconds and prints the version first, so it never hangs offline. Set
+`SUPERCOMPUTER_NO_UPDATE_CHECK=1` to skip the check.
 
 | Key | Action |
 |---|---|

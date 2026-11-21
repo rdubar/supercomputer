@@ -6,6 +6,13 @@ All notable changes to this project. Versions follow
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-21
+
+- `--update`: upgrades the way it was installed (`uv tool`, `pipx`, pip in a
+  virtualenv, or `git pull --ff-only` in a clone).
+- `--version` also checks PyPI for a newer release. It prints the version
+  first, gives up after 1.5 seconds, and is skipped with
+  `SUPERCOMPUTER_NO_UPDATE_CHECK=1`.
 - Packaging for PyPI as `supercomputer-console` (the `supercomputer` name is
   taken on PyPI). The command is still `supercomputer`.
 - Release plan (`ROADMAP.md`) and release steps (`RELEASING.md`).

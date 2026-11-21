@@ -12,6 +12,7 @@ import argparse
 import ctypes
 import curses
 import hashlib
+import json
 import math
 import os
 import platform
@@ -20,11 +21,16 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 REPO_URL = "github.com/rdubar/supercomputer"
+PYPI_NAME = "supercomputer-console"
+PYPI_URL = f"https://pypi.org/pypi/{PYPI_NAME}/json"
 
 THEMES = ["AMBER", "GREEN", "CYAN"]
 CONFIG_DIR = os.path.expanduser("~/.config/supercomputer")
@@ -1011,6 +1017,99 @@ def check(probe, do_notify=False, quiet=False):
     return max((lvl for lvl, _, _ in alarms), default=0)
 
 
+def latest_release(timeout):
+    """Newest version on PyPI as (version, None), or (None, reason).
+
+    Runs in a daemon thread with a hard deadline, so a slow DNS lookup or a
+    dead network can't hold anything up: urlopen's own timeout doesn't cover
+    name resolution.
+    """
+    result = {}
+
+    def fetch():
+        try:
+            req = urllib.request.Request(PYPI_URL, headers={
+                "Accept": "application/json", "User-Agent": f"supercomputer/{__version__}"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                result["version"] = json.load(r)["info"]["version"]
+        except urllib.error.HTTPError as e:
+            result["error"] = "no release on PyPI yet" if e.code == 404 else f"PyPI said HTTP {e.code}"
+        except (urllib.error.URLError, OSError):
+            result["error"] = "no connection"
+        except (ValueError, KeyError, TypeError):
+            result["error"] = "unexpected reply from PyPI"
+
+    t = threading.Thread(target=fetch, daemon=True)
+    t.start()
+    t.join(timeout)
+    if "version" in result:
+        return result["version"], None
+    return None, result.get("error", "no connection")
+
+
+def version_key(v):
+    return tuple(int(n) for n in re.findall(r"\d+", v)[:3])
+
+
+def is_newer(latest):
+    return version_key(latest) > version_key(__version__)
+
+
+def show_version():
+    """--version: print the version at once, then a quick update check."""
+    print(f"supercomputer {__version__}", flush=True)
+    if os.environ.get("SUPERCOMPUTER_NO_UPDATE_CHECK"):
+        return
+    latest, err = latest_release(timeout=1.5)
+    if err:
+        msg = f"update check skipped: {err}"
+    elif is_newer(latest):
+        msg = f"update available: {latest} (run: supercomputer --update)"
+    else:
+        msg = "up to date"
+    print(msg, file=sys.stderr)
+
+
+def install_method():
+    """How this copy was installed: (kind, upgrade command or None)."""
+    here = os.path.dirname(os.path.realpath(__file__))
+    if os.path.isdir(os.path.join(here, ".git")):
+        return "git checkout", ["git", "-C", here, "pull", "--ff-only"]
+    prefix = sys.prefix.replace("\\", "/")
+    if "/uv/tools/" in prefix and shutil.which("uv"):
+        return "uv tool", ["uv", "tool", "upgrade", PYPI_NAME]
+    if "/pipx/venvs/" in prefix and shutil.which("pipx"):
+        return "pipx", ["pipx", "upgrade", PYPI_NAME]
+    if sys.prefix != sys.base_prefix:
+        return "virtualenv", [sys.executable, "-m", "pip", "install", "--upgrade", PYPI_NAME]
+    return "unknown", None
+
+
+def update():
+    """--update: upgrade this copy the way it was installed. Returns an exit code."""
+    kind, cmd = install_method()
+    print(f"supercomputer {__version__} · installed via {kind}")
+    if kind != "git checkout":
+        latest, err = latest_release(timeout=5)
+        if err:
+            print(f"Can't check for updates: {err}.", file=sys.stderr)
+            return 1
+        if not is_newer(latest):
+            print(f"Up to date (latest is {latest}).")
+            return 0
+        print(f"Updating to {latest}.")
+    if cmd is None:
+        print("Not sure how this copy was installed, so not touching it. Try one of:\n"
+              f"  uv tool upgrade {PYPI_NAME}\n  pipx upgrade {PYPI_NAME}", file=sys.stderr)
+        return 1
+    print("$ " + " ".join(cmd), flush=True)
+    try:
+        return subprocess.call(cmd)
+    except OSError as e:
+        print(f"Couldn't run {cmd[0]}: {e}", file=sys.stderr)
+        return 1
+
+
 def main():
     ap = argparse.ArgumentParser(
         prog="supercomputer",
@@ -1029,8 +1128,16 @@ def main():
     ap.add_argument("--bell", action="store_true", help="console: ring the terminal bell on new alarms")
     ap.add_argument("--demo", action="store_true",
                     help="console: simulate load and cycle through every alarm (harmless)")
-    ap.add_argument("--version", action="version", version=f"supercomputer {__version__}")
+    ap.add_argument("--version", action="store_true",
+                    help="show the version and check quickly for a newer release")
+    ap.add_argument("--update", action="store_true",
+                    help="upgrade to the latest release (uv, pipx, venv or git checkout)")
     args = ap.parse_args()
+    if args.version:
+        show_version()
+        return
+    if args.update:
+        sys.exit(update())
     probe = make_probe()
     if args.banner:
         banner(probe)
