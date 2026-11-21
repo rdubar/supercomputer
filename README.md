@@ -143,7 +143,9 @@ a warning becomes critical.
 
 `supercomputer --demo` simulates heavy load and cycles through every alarm
 about once a minute. It's harmless: nothing is stressed, and the footer reads
-`DEMO: SIMULATED`.
+`DEMO: SIMULATED`. It's also safe for screenshots: the machine is called
+`HAL9000`, the serial reads `D3ADB33F`, and the storage units show the capacities of 1950s–70s IBM drives
+rather than your real disk sizes.
 
 To try real load, run this in another terminal. It keeps every core busy
 for 45 seconds at the lowest priority, so real work still comes first. The

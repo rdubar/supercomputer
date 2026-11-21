@@ -6,6 +6,13 @@ All notable changes to this project. Versions follow
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-21
+
+- `--demo` is safe for screenshots: the machine is called `HAL9000`, the
+  serial reads `D3ADB33F`, and the
+  storage units show vintage IBM drive capacities instead of your real disk
+  sizes.
+
 ## [1.3.2] - 2026-11-21
 
 - An alarm that goes from warning to critical is announced again: logged as

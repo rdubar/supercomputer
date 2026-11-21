@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-__version__ = "1.3.2"
+__version__ = "1.3.3"
 REPO_URL = "github.com/rdubar/supercomputer"
 PYPI_NAME = "supercomputer-console"
 PYPI_URL = f"https://pypi.org/pypi/{PYPI_NAME}/json"
@@ -495,6 +495,12 @@ DEMO_SCRIPT = [  # (seconds, alarms) — replayed in a loop by --demo
 ]
 
 
+DEMO_HOST, DEMO_SERIAL = "HAL9000", "D3ADB33F"  # shown instead of the real ones by --demo
+# --demo shows these capacities instead of the real ones, so screenshots don't
+# reveal your disks: IBM 350 (RAMAC), 1311, 2311, 2314, 3330 and 3350 drives.
+DEMO_DISK_SIZES = [3.75e6, 2e6, 7.25e6, 29e6, 100e6, 317.5e6]
+
+
 def demo_state(elapsed):
     """(alarms, load level 0..1) for the demo at a given time."""
     total = sum(d for d, _ in DEMO_SCRIPT)
@@ -635,6 +641,8 @@ class Panel:
         self.s = Sampler(probe)
         self.s.demo = demo
         self.host, self.chip, self.serial = identity(probe)
+        if demo:
+            self.host, self.serial = DEMO_HOST, DEMO_SERIAL
         self.log = []
         self.last_log = 0
         self.lamps = {}
@@ -815,6 +823,8 @@ class Panel:
                 row = y + 1 + i
                 r, wr = s.dio.get(key, (0, 0))
                 total, frac = s.usage.get(usage_path, (0, 0))
+                if s.demo:
+                    total = DEMO_DISK_SIZES[i % len(DEMO_DISK_SIZES)]
                 self.put(row, 2, f"{label:6}", self.LABEL)
                 self.put(row, 9, "R", self.LABEL)
                 self.lamp_row(row, 11, f"{key}r{i}", 4, rate_level(r))
@@ -1144,7 +1154,8 @@ def main():
     ap.add_argument("--quiet", action="store_true", help="with --check: print nothing when nominal")
     ap.add_argument("--bell", action="store_true", help="console: ring the terminal bell on new alarms")
     ap.add_argument("--demo", action="store_true",
-                    help="console: simulate load and cycle through every alarm (harmless)")
+                    help="console: simulate load and cycle through every alarm (harmless); "
+                         "hides the host name, serial and disk sizes for screenshots")
     ap.add_argument("--version", action="store_true",
                     help="show the version and check quickly for a newer release")
     ap.add_argument("--update", action="store_true",
