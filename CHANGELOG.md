@@ -6,6 +6,12 @@ All notable changes to this project. Versions follow
 
 ## [Unreleased]
 
+- Memory on macOS is less jumpy: the kernel's brief "critical" pressure
+  level now raises a warning (`CORE STORAGE PRESSURE HIGH`). It is only
+  critical when the machine is also paging heavily to swap, or stays
+  critical: for 30 seconds in the console, or on two `--check --notify`
+  runs in a row.
+
 ## [1.3.3] - 2026-11-21
 
 - `--demo` is safe for screenshots: the machine is called `HAL9000`, the

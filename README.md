@@ -128,7 +128,7 @@ supercomputer-wallpaper out.png --size 2560x1440
 | Alarm | Warning | Critical |
 |---|---|---|
 | Load (5-min average per core) | above 1.5x | above 3x |
-| Memory | under 10% available (macOS: pressure "warning") | under 5% (macOS: pressure "critical") |
+| Memory | under 10% available (macOS: pressure "warning" or "critical") | under 5% (macOS: pressure "critical" while paging heavily, or for 30 seconds; with `--check --notify`, two checks in a row) |
 | Swap | over 80% used, or heavy paging | |
 | CPU | every core above 95% for 30 seconds | |
 | Temperature | 80 °C | 85 °C |

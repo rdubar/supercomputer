@@ -406,11 +406,12 @@ def raised(alarms, before):
             if lvl > before.get(key, 0)]
 
 
-def assess(probe, swap_rate=None, cpu_pinned=False):
+def assess(probe, swap_rate=None, cpu_pinned=False, mem_sustained=False):
     """Current alarms as [(level, key, text)]. Cheap: a few reads, no sleeping.
 
-    swap_rate (pages/s) and cpu_pinned need a time window, so only callers
-    that sample over time (the console, --check) pass them.
+    swap_rate (pages/s), cpu_pinned and mem_sustained need a time window, so
+    only callers that sample over time (the console, --check) pass them.
+    Without either swap_rate or mem_sustained, macOS memory can only warn.
     """
     alarms = []
 
@@ -428,9 +429,15 @@ def assess(probe, swap_rate=None, cpu_pinned=False):
 
     total, avail = probe.memory()
     pressure = probe.mem_pressure()
+    heavy_paging = swap_rate is not None and swap_rate > 250
     if pressure is not None:
-        if pressure >= 4:
+        # The kernel's "critical" level flickers on small Macs while the
+        # compressor copes; only call it critical when it is also paging
+        # hard or has stayed critical (mem_sustained).
+        if pressure >= 4 and (heavy_paging or mem_sustained):
             add(CRIT, "mem", "CORE STORAGE PRESSURE CRITICAL")
+        elif pressure >= 4:
+            add(WARN, "mem", "CORE STORAGE PRESSURE HIGH")
         elif pressure >= 2:
             add(WARN, "mem", "CORE STORAGE PRESSURE ELEVATED")
     elif total:
@@ -443,7 +450,7 @@ def assess(probe, swap_rate=None, cpu_pinned=False):
     stotal, sused = probe.swap()
     if stotal and sused / stotal > 0.8:
         add(WARN, "swap", f"DRUM STORAGE {sused / stotal * 100:.0f}% COMMITTED")
-    if swap_rate is not None and swap_rate > 250:
+    if heavy_paging:
         add(WARN, "paging", f"HEAVY PAGING TO DRUM: {swap_rate:.0f} PAGES/S")
 
     t = probe.temperature()
@@ -535,6 +542,7 @@ class Sampler:
         self.prev_swap = (probe.swap_pages(), time.monotonic())
         self.swap_rate = 0.0
         self.hot_secs = 0
+        self.mem_crit_secs = 0
         self.alarms = assess(probe)
         self.tick = 0
         self.demo = False
@@ -566,12 +574,14 @@ class Sampler:
             self.update_jobs()
         avg = sum(self.cpu.values()) / max(len(self.cpu), 1)
         self.hot_secs = self.hot_secs + 1 if avg > 0.95 else 0
+        self.mem_crit_secs = self.mem_crit_secs + 1 if (self.p.mem_pressure() or 0) >= 4 else 0
         if self.tick % 5 == 0:
             self.services = self.p.service_states()
             pages, pt = self.p.swap_pages(), time.monotonic()
             self.swap_rate = max(0, pages - self.prev_swap[0]) / max(pt - self.prev_swap[1], 1e-3)
             self.prev_swap = (pages, pt)
-            self.alarms = assess(self.p, self.swap_rate, self.hot_secs >= 30)
+            self.alarms = assess(self.p, self.swap_rate, self.hot_secs >= 30,
+                                 self.mem_crit_secs >= 30)
         if self.demo:
             self.alarms, load = demo_state(now - self.demo_start)
             for k in self.cpu:
@@ -991,6 +1001,8 @@ def alarm_lines(alarms, ok_colour, reset):
 
 # ================================================================ check
 STATE_FILE = os.path.expanduser("~/.cache/supercomputer/alarms")
+# Exists while the last --notify run saw kernel memory pressure "critical".
+MEM_CRIT_FILE = os.path.expanduser("~/.cache/supercomputer/mem-critical")
 
 
 def notify(title, message):
@@ -1008,15 +1020,18 @@ def check(probe, do_notify=False, quiet=False):
     swap_rate = max(0, probe.swap_pages() - swap0)
     cpu1 = probe.cpu_times()
     busy = [1 - (cpu1[k][1] - cpu0[k][1]) / max(cpu1[k][0] - cpu0[k][0], 1) for k in cpu1 if k in cpu0]
-    alarms = assess(probe, swap_rate, bool(busy) and min(busy) > 0.98)
-    host = identity(probe)[0]
     # State file: "key:level" per alarm. A bare "key" (written before 1.3.2)
     # counts as a warning, so upgrading doesn't re-announce it.
-    now = {k: lvl for lvl, k, _ in alarms}
     before = {}
     for entry in read(STATE_FILE).split():
         m = re.fullmatch(r"(.+):([12])", entry)
         before[m[1] if m else entry] = int(m[2]) if m else WARN
+    # Kernel "critical" on two --notify runs in a row counts as sustained.
+    mem_crit = (probe.mem_pressure() or 0) >= 4
+    alarms = assess(probe, swap_rate, bool(busy) and min(busy) > 0.98,
+                    do_notify and mem_crit and os.path.exists(MEM_CRIT_FILE))
+    host = identity(probe)[0]
+    now = {k: lvl for lvl, k, _ in alarms}
     changed = now != before
     # --quiet: silent when nominal; with --notify, also silent while unchanged
     if not quiet or (alarms and not do_notify) or (do_notify and changed):
@@ -1027,6 +1042,14 @@ def check(probe, do_notify=False, quiet=False):
         print(f"{host} · SUPERCOMPUTER V{__version__} STATUS CHECK {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("\n".join(lines))
     if do_notify:
+        try:
+            if mem_crit:
+                os.makedirs(os.path.dirname(MEM_CRIT_FILE), exist_ok=True)
+                open(MEM_CRIT_FILE, "w").close()
+            elif os.path.exists(MEM_CRIT_FILE):
+                os.remove(MEM_CRIT_FILE)
+        except OSError:
+            pass
         if changed:
             new = [("ESCALATED: " if esc else "") + t for _, _, t, esc in raised(alarms, before)]
             if new:
