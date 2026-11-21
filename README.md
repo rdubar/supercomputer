@@ -51,6 +51,9 @@ glows in amber, green or cyan phosphor, and the lamps blink.)
 - **Subsystems**: status lamps for services such as Plex, Samba, SSH,
   Tailscale or Docker. A service that goes down turns red and the operator
   log calls for attention.
+- **Strain alarms**: a line under the header stays dim while all is well,
+  and flashes red when the machine is under strain. The operator log
+  announces each alarm and when it clears. See [Alarms](#alarms).
 - **Operator log**: teletype-style messages about real events (busy disks,
   saturated CPUs, network bursts), with idle chatter in between.
 - **Login banner**: `supercomputer --banner` prints a short static version,
@@ -89,7 +92,9 @@ For the wallpaper generator, include the extra:
 ```sh
 supercomputer            # the operator console (best at 100x40, minimum 80x24)
 supercomputer --green    # start in a colour: --amber, --green or --cyan
-supercomputer --banner   # short static banner, then exit
+supercomputer --banner   # short static banner (with any alarms), then exit
+supercomputer --check    # one-shot strain check; exit 0 nominal, 1 alarm, 2 critical
+supercomputer --version  # also shown bottom right of the console
 supercomputer-wallpaper  # writes ~/Pictures/wallpapers/supercomputer.png
 supercomputer-wallpaper out.png --size 2560x1440
 ```
@@ -101,6 +106,34 @@ supercomputer-wallpaper out.png --size 2560x1440
 | `c` | Change phosphor colour (remembered between runs) |
 | `p` / Space | Freeze / resume the panel |
 | `q` / Esc | Halt the console (Esc closes a card first) |
+
+## Alarms
+
+| Alarm | Warning | Critical |
+|---|---|---|
+| Load (5-min average per core) | above 1.5x | above 3x |
+| Memory | under 10% available (macOS: pressure "warning") | under 5% (macOS: pressure "critical") |
+| Swap | over 80% used, or heavy paging | |
+| CPU | every core above 95% for 30 seconds | |
+| Temperature | 80 °C | 85 °C |
+| Raspberry Pi power | under-voltage recorded since boot, throttling | under-voltage now |
+| Disks | 95% full | 98% full |
+| Services | a subsystem lamp's service stops | |
+
+`--bell` makes the console ring the terminal bell on a new alarm.
+
+### Background checks
+
+`supercomputer --check` takes about a second, mostly spent waiting, so it is
+cheap to run on a timer. Add `--notify` for a desktop notification
+(`osascript` on macOS, `notify-send` on Linux). It notifies only when the set
+of alarms changes, not on every run, and remembers the last state in
+`~/.cache/supercomputer/alarms`. Add `--quiet` to print nothing while all is
+well. For example, a crontab line:
+
+```
+*/5 * * * * /usr/bin/python3 /path/to/supercomputer.py --check --notify --quiet
+```
 
 ### Login banner
 

@@ -17,12 +17,13 @@ import os
 import platform
 import random
 import re
+import shutil
 import subprocess
 import sys
 import time
 import uuid
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 REPO_URL = "github.com/rdubar/supercomputer"
 
 THEMES = ["AMBER", "GREEN", "CYAN"]
@@ -181,6 +182,32 @@ class LinuxProbe:
         except ValueError:
             return 0
 
+    def swap(self):
+        m = {}
+        for line in read("/proc/meminfo").splitlines():
+            k, v = line.split(":", 1)
+            m[k] = int(v.split()[0]) * 1024
+        total = m.get("SwapTotal", 0)
+        return total, total - m.get("SwapFree", 0)
+
+    def swap_pages(self):
+        n = 0
+        for line in read("/proc/vmstat").splitlines():
+            k, _, v = line.partition(" ")
+            if k in ("pswpin", "pswpout"):
+                n += int(v)
+        return n
+
+    def mem_pressure(self):
+        return None
+
+    def throttled(self):
+        """Raspberry Pi firmware throttle flags, or None elsewhere."""
+        if not shutil.which("vcgencmd"):
+            return None
+        m = re.search(r"throttled=(0x[0-9a-fA-F]+)", run("vcgencmd", "get_throttled"))
+        return int(m.group(1), 16) if m else None
+
     def proc_cpu(self):
         """{pid: (name, cpu seconds)}."""
         tck = os.sysconf("SC_CLK_TCK")
@@ -315,6 +342,23 @@ class MacProbe:
     def uptime(self):
         return time.time() - self.boot
 
+    def swap(self):
+        text = run("sysctl", "-n", "vm.swapusage")
+        vals = dict(re.findall(r"(total|used) = ([\d.]+)M", text))
+        return int(float(vals.get("total", 0)) * 2**20), int(float(vals.get("used", 0)) * 2**20)
+
+    def swap_pages(self):
+        m = re.findall(r"Swap(?:ins|outs):\s+(\d+)", run("vm_stat"))
+        return sum(int(x) for x in m)
+
+    def mem_pressure(self):
+        """macOS memory pressure: 1 normal, 2 warning, 4 critical."""
+        v = run("sysctl", "-n", "kern.memorystatus_vm_pressure_level").strip()
+        return int(v) if v.isdigit() else None
+
+    def throttled(self):
+        return None
+
     def proc_cpu(self):
         out = {}
         for line in run("ps", "-A", "-o", "pid=,time=,comm=").splitlines():
@@ -345,6 +389,83 @@ def make_probe():
     return MacProbe() if IS_MAC else LinuxProbe()
 
 
+# ================================================================ strain
+WARN, CRIT = 1, 2
+
+
+def assess(probe, swap_rate=None, cpu_pinned=False):
+    """Current alarms as [(level, key, text)]. Cheap: a few reads, no sleeping.
+
+    swap_rate (pages/s) and cpu_pinned need a time window, so only callers
+    that sample over time (the console, --check) pass them.
+    """
+    alarms = []
+
+    def add(level, key, text):
+        alarms.append((level, key, text))
+
+    ncores = len(probe.cpu_times()) or os.cpu_count() or 1
+    load5 = os.getloadavg()[1] / ncores
+    if load5 > 3:
+        add(CRIT, "load", f"JOB QUEUE OVERLOADED: LOAD {load5:.1f}x CAPACITY")
+    elif load5 > 1.5:
+        add(WARN, "load", f"JOB QUEUE BACKLOG: LOAD {load5:.1f}x CAPACITY")
+    if cpu_pinned:
+        add(WARN, "cpu", "ALL PROCESSORS SATURATED FOR 30 S")
+
+    total, avail = probe.memory()
+    pressure = probe.mem_pressure()
+    if pressure is not None:
+        if pressure >= 4:
+            add(CRIT, "mem", "CORE STORAGE PRESSURE CRITICAL")
+        elif pressure >= 2:
+            add(WARN, "mem", "CORE STORAGE PRESSURE ELEVATED")
+    elif total:
+        free = avail / total
+        if free < 0.05:
+            add(CRIT, "mem", f"CORE STORAGE EXHAUSTED: {free * 100:.0f}% FREE")
+        elif free < 0.10:
+            add(WARN, "mem", f"CORE STORAGE LOW: {free * 100:.0f}% FREE")
+
+    stotal, sused = probe.swap()
+    if stotal and sused / stotal > 0.8:
+        add(WARN, "swap", f"DRUM STORAGE {sused / stotal * 100:.0f}% COMMITTED")
+    if swap_rate is not None and swap_rate > 250:
+        add(WARN, "paging", f"HEAVY PAGING TO DRUM: {swap_rate:.0f} PAGES/S")
+
+    t = probe.temperature()
+    if t is not None:
+        if t >= 85:
+            add(CRIT, "temp", f"COOLANT CRITICAL: CORE {t:.0f} C")
+        elif t >= 80:
+            add(WARN, "temp", f"COOLANT HOT: CORE {t:.0f} C")
+
+    th = probe.throttled()
+    if th:
+        if th & 0x1:
+            add(CRIT, "volt", "POWER BROWNOUT: UNDER-VOLTAGE NOW")
+        elif th & 0x10000:
+            add(WARN, "volt", "BROWNOUT RECORDED SINCE BOOT")
+        if th & 0x6:
+            add(WARN, "throttle", "PROCESSORS THROTTLED BY FIRMWARE")
+        elif th & 0x8:
+            add(WARN, "throttle", "SOFT TEMPERATURE LIMIT ACTIVE")
+
+    for label, _, _, path in probe.disks:
+        _, frac = disk_usage(path)
+        if frac >= 0.98:
+            add(CRIT, f"disk:{label}", f"STORAGE UNIT {label} {frac * 100:.0f}% FULL")
+        elif frac >= 0.95:
+            add(WARN, f"disk:{label}", f"STORAGE UNIT {label} {frac * 100:.0f}% FULL")
+
+    for label, ok in probe.service_states():
+        if not ok:
+            add(WARN, f"svc:{label}", f"SUBSYSTEM {label} OFFLINE")
+
+    alarms.sort(key=lambda a: -a[0])
+    return alarms
+
+
 # ================================================================ sampler
 class Sampler:
     def __init__(self, probe):
@@ -364,6 +485,10 @@ class Sampler:
         self.prev_proc = probe.proc_cpu()
         self.prev_proc_t = time.monotonic()
         self.jobs = []
+        self.prev_swap = (probe.swap_pages(), time.monotonic())
+        self.swap_rate = 0.0
+        self.hot_secs = 0
+        self.alarms = assess(probe)
         self.tick = 0
 
     def update(self):
@@ -390,8 +515,14 @@ class Sampler:
         self.tick += 1
         if self.tick % 3 == 0:
             self.update_jobs()
+        avg = sum(self.cpu.values()) / max(len(self.cpu), 1)
+        self.hot_secs = self.hot_secs + 1 if avg > 0.95 else 0
         if self.tick % 5 == 0:
             self.services = self.p.service_states()
+            pages, pt = self.p.swap_pages(), time.monotonic()
+            self.swap_rate = max(0, pages - self.prev_swap[0]) / max(pt - self.prev_swap[1], 1e-3)
+            self.prev_swap = (pages, pt)
+            self.alarms = assess(self.p, self.swap_rate, self.hot_secs >= 30)
         if self.tick % 30 == 0:
             self.usage = {d[3]: disk_usage(d[3]) for d in self.disks}
 
@@ -445,7 +576,7 @@ def identity(probe):
 
 # ================================================================ panel
 class Panel:
-    def __init__(self, scr, probe, theme):
+    def __init__(self, scr, probe, theme, bell=False):
         self.scr = scr
         self.theme = theme
         self.paused = False
@@ -455,6 +586,9 @@ class Panel:
         self.log = []
         self.last_log = 0
         self.lamps = {}
+        self.known_alarms = {}
+        self.bell = bell
+        self.frame = 0
         curses.curs_set(0)
         scr.nodelay(True)
         curses.start_color()
@@ -512,8 +646,21 @@ class Panel:
         self.put(y, x + 2, f" {title} ", self.MAIN)
 
     # ------------------------------------------------------------ events
+    def alarm_events(self):
+        current = {key: (lvl, text) for lvl, key, text in self.s.alarms}
+        for key, (lvl, text) in current.items():
+            if key not in self.known_alarms:
+                self.say(f"*** {'CRITICAL' if lvl == CRIT else 'ALARM'}: {text} ***")
+                if self.bell:
+                    curses.beep()
+        for key, (_, text) in self.known_alarms.items():
+            if key not in current:
+                self.say(f"ALARM CLEARED: {text}")
+        self.known_alarms = current
+
     def events(self):
         s = self.s
+        self.alarm_events()
         if time.monotonic() - self.last_log < 4:
             return
         msgs = []
@@ -526,9 +673,6 @@ class Panel:
             msgs.append(f"VECTOR PIPELINE AT {avg * 100:.0f}% — ALL PROCESSORS ENGAGED")
         if s.net[0] + s.net[1] > 2e6:
             msgs.append(f"DATA LINK: RX {human(s.net[0])}/S  TX {human(s.net[1])}/S")
-        for label, ok in s.services:
-            if not ok:
-                msgs.append(f"*** SUBSYSTEM {label} OFFLINE — OPERATOR ATTENTION ***")
         if not msgs and random.random() < 0.15:
             coolant = f"CORE {s.temp:.1f} C." if s.temp is not None else "SENSORS SEALED."
             msgs.append(random.choice([
@@ -567,6 +711,15 @@ class Panel:
         else:
             self.put(1, 56, f"{s.temp:5.1f} C", self.WARN if s.temp > 75 else self.MAIN)
         self.put(1, W - 9, time.strftime("%H:%M:%S"), self.MAIN)
+        self.frame += 1
+        if s.alarms:
+            worst = s.alarms[0][0]
+            flash = self.frame % 4 < 2 or worst == WARN
+            tag = " ▲ CRITICAL " if worst == CRIT else " ▲ ALARM "
+            self.put(2, 1, tag, (self.WARN | curses.A_REVERSE) if flash else self.WARN)
+            self.put(2, len(tag) + 2, "  ·  ".join(a[2] for a in s.alarms)[: W - len(tag) - 3], self.WARN)
+        else:
+            self.put(2, 1, "ALARMS: NONE  ·  ALL UNITS NOMINAL", self.DIM)
 
         # Processors: one column up to 8 cores, two columns beyond that
         y = 3
@@ -660,6 +813,9 @@ class Panel:
         if self.paused:
             footer += "   *** FROZEN — [P] RESUMES ***"
         self.put(h - 1, 0, footer, self.WARN if self.paused else self.DIM)
+        ver = f"SUPERCOMPUTER V{__version__}"
+        if len(footer) + len(ver) + 2 < W:
+            self.put(h - 1, W - len(ver), ver, self.DIM)
         if self.overlay == "help":
             self.card(h, W, "OPERATOR CONTROLS", [
                 "C        CHANGE PHOSPHOR: AMBER / GREEN / CYAN",
@@ -674,6 +830,8 @@ class Panel:
                 "  DATA LINK            NETWORK IN / OUT",
                 "  ACTIVE JOBS          BUSIEST PROCESSES (3 S)",
                 "",
+                "ALARM LINE (UNDER THE HEADER) TURNS RED UNDER",
+                "STRAIN: MEMORY, LOAD, HEAT, POWER, DISKS, SERVICES.",
                 "COLOUR IS REMEMBERED. START WITH --GREEN ETC.",
             ])
         elif self.overlay == "credits":
@@ -745,13 +903,67 @@ def banner(probe):
     print("\n".join([
         f"{D}╔{'═' * 62}╗{R}",
         f"{D}║{R}{A}{('  ' + host + ' · ' + chip + ' VECTOR PROCESSING SYSTEM')[:62].ljust(62)}{R}{D}║{R}",
-        f"{D}║{R}{A}{('  ' + lamps).ljust(62)}{R}{D}║{R}",
+        f"{D}║{R}{A}{('  ' + lamps).ljust(48)}{R}{D}{('V' + __version__).rjust(12)}  ║{R}",
         f"{D}╚{'═' * 62}╝{R}",
         f"{A}  UPTIME {uptime_str(probe.uptime())}   LOAD {load}{coolant}{R}",
         f"{A}  CORE MEMORY {(tm - ta) // 2**20:,} / {tm // 2**20:,} MW   {svc}{R}",
+    ] + alarm_lines(assess(probe), A, R) + [
         f"{D}  TYPE 'supercomputer' FOR THE OPERATOR CONSOLE{R}",
         "",
     ]))
+
+
+def alarm_lines(alarms, ok_colour, reset):
+    red = "\033[1;31m"
+    if not alarms:
+        return [f"{ok_colour}  ■ ALARMS: NONE · ALL UNITS NOMINAL{reset}"]
+    return [f"{red}  ▲ {'CRITICAL' if lvl == CRIT else 'ALARM   '}  {text}{reset}" for lvl, _, text in alarms]
+
+
+# ================================================================ check
+STATE_FILE = os.path.expanduser("~/.cache/supercomputer/alarms")
+
+
+def notify(title, message):
+    if IS_MAC:
+        esc = message.replace("\\", "").replace('"', "'")
+        run("osascript", "-e", f'display notification "{esc}" with title "{title}"')
+    elif shutil.which("notify-send"):
+        run("notify-send", "-a", "supercomputer", title, message)
+
+
+def check(probe, do_notify=False, quiet=False):
+    """One-shot health check. Exit code 0 nominal, 1 alarm, 2 critical."""
+    swap0, cpu0 = probe.swap_pages(), probe.cpu_times()
+    time.sleep(1)
+    swap_rate = max(0, probe.swap_pages() - swap0)
+    cpu1 = probe.cpu_times()
+    busy = [1 - (cpu1[k][1] - cpu0[k][1]) / max(cpu1[k][0] - cpu0[k][0], 1) for k in cpu1 if k in cpu0]
+    alarms = assess(probe, swap_rate, bool(busy) and min(busy) > 0.98)
+    host = identity(probe)[0]
+    if not (quiet and not alarms):
+        A, R = ("\033[1;33m", "\033[0m") if sys.stdout.isatty() else ("", "")
+        lines = alarm_lines(alarms, A, R)
+        if not sys.stdout.isatty():
+            lines = [re.sub(r"\033\[[0-9;]*m", "", l) for l in lines]
+        print(f"{host} · SUPERCOMPUTER V{__version__} STATUS CHECK {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print("\n".join(lines))
+    if do_notify:
+        keys = sorted(k for _, k, _ in alarms)
+        before = read(STATE_FILE).split()
+        if keys != before:
+            new = [t for _, k, t in alarms if k not in before]
+            if new:
+                notify(f"{host} SUPERCOMPUTER ALARM", "; ".join(new))
+            elif not alarms:
+                notify(f"{host} SUPERCOMPUTER", "ALL ALARMS CLEARED. ALL UNITS NOMINAL.")
+            try:
+                os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+                with open(STATE_FILE, "w") as f:
+                    f.write(" ".join(keys) + "\n")
+            except OSError:
+                pass
+    return max((lvl for lvl, _, _ in alarms), default=0)
 
 
 def main():
@@ -764,15 +976,23 @@ def main():
         colour.add_argument(f"--{t.lower()}", dest="theme", action="store_const", const=t,
                             help=f"start in {t.lower()} phosphor")
     ap.add_argument("--banner", action="store_true", help="print a short static banner and exit")
+    ap.add_argument("--check", action="store_true",
+                    help="one-shot strain check; exit 0 nominal, 1 alarm, 2 critical")
+    ap.add_argument("--notify", action="store_true",
+                    help="with --check: desktop notification when alarms change")
+    ap.add_argument("--quiet", action="store_true", help="with --check: print nothing when nominal")
+    ap.add_argument("--bell", action="store_true", help="console: ring the terminal bell on new alarms")
     ap.add_argument("--version", action="version", version=f"supercomputer {__version__}")
     args = ap.parse_args()
     probe = make_probe()
     if args.banner:
         banner(probe)
         return
+    if args.check:
+        sys.exit(check(probe, args.notify, args.quiet))
     os.environ.setdefault("ESCDELAY", "25")
     theme = load_theme(args.theme)
-    curses.wrapper(lambda scr: Panel(scr, probe, theme).run())
+    curses.wrapper(lambda scr: Panel(scr, probe, theme, args.bell).run())
 
 
 if __name__ == "__main__":
