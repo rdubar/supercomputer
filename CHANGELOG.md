@@ -6,6 +6,8 @@ All notable changes to this project. Versions follow
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-11-21
+
 - Memory on macOS is less jumpy: the kernel's brief "critical" pressure
   level now raises a warning (`CORE STORAGE PRESSURE HIGH`). It is only
   critical when the machine is also paging heavily to swap, or stays
