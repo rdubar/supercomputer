@@ -27,7 +27,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 REPO_URL = "github.com/rdubar/supercomputer"
 PYPI_NAME = "supercomputer-console"
 PYPI_URL = f"https://pypi.org/pypi/{PYPI_NAME}/json"
@@ -1076,6 +1076,8 @@ def install_method():
     if os.path.isdir(os.path.join(here, ".git")):
         return "git checkout", ["git", "-C", here, "pull", "--ff-only"]
     prefix = sys.prefix.replace("\\", "/")
+    if "/Cellar/supercomputer/" in os.path.realpath(__file__) and shutil.which("brew"):
+        return "Homebrew", ["brew", "upgrade", "rdubar/tap/supercomputer"]
     if "/uv/tools/" in prefix and shutil.which("uv"):
         return "uv tool", ["uv", "tool", "upgrade", PYPI_NAME]
     if "/pipx/venvs/" in prefix and shutil.which("pipx"):
@@ -1131,7 +1133,7 @@ def main():
     ap.add_argument("--version", action="store_true",
                     help="show the version and check quickly for a newer release")
     ap.add_argument("--update", action="store_true",
-                    help="upgrade to the latest release (uv, pipx, venv or git checkout)")
+                    help="upgrade to the latest release (uv, pipx, Homebrew, venv or git checkout)")
     args = ap.parse_args()
     if args.version:
         show_version()

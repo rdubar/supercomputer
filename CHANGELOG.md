@@ -6,6 +6,11 @@ All notable changes to this project. Versions follow
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-21
+
+- `--update` recognises a Homebrew install and runs
+  `brew upgrade rdubar/tap/supercomputer` rather than pip.
+
 ## [1.3.0] - 2026-11-21
 
 - `--update`: upgrades the way it was installed (`uv tool`, `pipx`, pip in a
