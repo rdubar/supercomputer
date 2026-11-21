@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 REPO_URL = "github.com/rdubar/supercomputer"
 
 THEMES = ["AMBER", "GREEN", "CYAN"]
@@ -466,6 +466,34 @@ def assess(probe, swap_rate=None, cpu_pinned=False):
     return alarms
 
 
+# ================================================================ demo
+DEMO_SCRIPT = [  # (seconds, alarms) — replayed in a loop by --demo
+    (8, []),
+    (10, [(WARN, "cpu", "ALL PROCESSORS SATURATED FOR 30 S")]),
+    (10, [(WARN, "cpu", "ALL PROCESSORS SATURATED FOR 30 S"),
+          (WARN, "temp", "COOLANT HOT: CORE 82 C")]),
+    (10, [(CRIT, "temp", "COOLANT CRITICAL: CORE 86 C"),
+          (WARN, "throttle", "PROCESSORS THROTTLED BY FIRMWARE")]),
+    (8, [(CRIT, "volt", "POWER BROWNOUT: UNDER-VOLTAGE NOW")]),
+    (8, [(WARN, "mem", "CORE STORAGE LOW: 7% FREE"),
+         (WARN, "paging", "HEAVY PAGING TO DRUM: 900 PAGES/S")]),
+    (8, [(WARN, "disk:SYS", "STORAGE UNIT SYS 96% FULL"),
+         (WARN, "svc:PLEX", "SUBSYSTEM PLEX OFFLINE")]),
+]
+
+
+def demo_state(elapsed):
+    """(alarms, load level 0..1) for the demo at a given time."""
+    total = sum(d for d, _ in DEMO_SCRIPT)
+    t = elapsed % total
+    for i, (dur, alarms) in enumerate(DEMO_SCRIPT):
+        if t < dur:
+            load = 0.15 if i == 0 else (0.98 if i in (1, 2, 3) else 0.6)
+            return alarms, load
+        t -= dur
+    return [], 0.1
+
+
 # ================================================================ sampler
 class Sampler:
     def __init__(self, probe):
@@ -490,6 +518,8 @@ class Sampler:
         self.hot_secs = 0
         self.alarms = assess(probe)
         self.tick = 0
+        self.demo = False
+        self.demo_start = time.monotonic()
 
     def update(self):
         now = time.monotonic()
@@ -523,6 +553,14 @@ class Sampler:
             self.swap_rate = max(0, pages - self.prev_swap[0]) / max(pt - self.prev_swap[1], 1e-3)
             self.prev_swap = (pages, pt)
             self.alarms = assess(self.p, self.swap_rate, self.hot_secs >= 30)
+        if self.demo:
+            self.alarms, load = demo_state(now - self.demo_start)
+            for k in self.cpu:
+                self.cpu[k] = max(0.0, min(1.0, load + random.uniform(-0.08, 0.04)))
+            for _, key, _, _ in self.disks[:2]:
+                self.dio[key] = (load * random.uniform(20e6, 160e6), load * random.uniform(1e6, 40e6))
+            self.net = (load * random.uniform(5e6, 40e6), load * random.uniform(1e6, 10e6))
+            self.temp = 60 + 27 * load if self.temp is not None else None
         if self.tick % 30 == 0:
             self.usage = {d[3]: disk_usage(d[3]) for d in self.disks}
 
@@ -576,12 +614,13 @@ def identity(probe):
 
 # ================================================================ panel
 class Panel:
-    def __init__(self, scr, probe, theme, bell=False):
+    def __init__(self, scr, probe, theme, bell=False, demo=False):
         self.scr = scr
         self.theme = theme
         self.paused = False
         self.overlay = None  # "help" | "credits"
         self.s = Sampler(probe)
+        self.s.demo = demo
         self.host, self.chip, self.serial = identity(probe)
         self.log = []
         self.last_log = 0
@@ -595,6 +634,8 @@ class Panel:
         self.set_theme()
         self.say(f"{self.host} COLD START COMPLETE. ALL UNITS NOMINAL.")
         self.say("PRESS H FOR OPERATOR CONTROLS, A FOR CREDITS.")
+        if demo:
+            self.say("DEMONSTRATION MODE: SIMULATED LOAD AND ALARMS. NOTHING IS WRONG.")
 
     def set_theme(self):
         bright = (curses.COLOR_YELLOW, curses.COLOR_GREEN, curses.COLOR_CYAN)[self.theme]
@@ -812,6 +853,8 @@ class Panel:
         footer = f"[H] HELP  [A] CREDITS  [C] PHOSPHOR: {THEMES[self.theme]}  [Q] HALT"
         if self.paused:
             footer += "   *** FROZEN — [P] RESUMES ***"
+        elif s.demo:
+            footer += "   *** DEMO: SIMULATED ***"
         self.put(h - 1, 0, footer, self.WARN if self.paused else self.DIM)
         ver = f"SUPERCOMPUTER V{__version__}"
         if len(footer) + len(ver) + 2 < W:
@@ -984,6 +1027,8 @@ def main():
                     help="with --check: desktop notification when alarms change")
     ap.add_argument("--quiet", action="store_true", help="with --check: print nothing when nominal")
     ap.add_argument("--bell", action="store_true", help="console: ring the terminal bell on new alarms")
+    ap.add_argument("--demo", action="store_true",
+                    help="console: simulate load and cycle through every alarm (harmless)")
     ap.add_argument("--version", action="version", version=f"supercomputer {__version__}")
     args = ap.parse_args()
     probe = make_probe()
@@ -994,7 +1039,7 @@ def main():
         sys.exit(check(probe, args.notify, args.quiet))
     os.environ.setdefault("ESCDELAY", "25")
     theme = load_theme(args.theme)
-    curses.wrapper(lambda scr: Panel(scr, probe, theme, args.bell).run())
+    curses.wrapper(lambda scr: Panel(scr, probe, theme, args.bell, args.demo).run())
 
 
 if __name__ == "__main__":

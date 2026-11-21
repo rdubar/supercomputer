@@ -93,6 +93,7 @@ For the wallpaper generator, include the extra:
 supercomputer            # the operator console (best at 100x40, minimum 80x24)
 supercomputer --green    # start in a colour: --amber, --green or --cyan
 supercomputer --banner   # short static banner (with any alarms), then exit
+supercomputer --demo     # simulated load and alarms, for showing off
 supercomputer --check    # one-shot strain check; exit 0 nominal, 1 alarm, 2 critical
 supercomputer --version  # also shown bottom right of the console
 supercomputer-wallpaper  # writes ~/Pictures/wallpapers/supercomputer.png
@@ -121,6 +122,22 @@ supercomputer-wallpaper out.png --size 2560x1440
 | Services | a subsystem lamp's service stops | |
 
 `--bell` makes the console ring the terminal bell on a new alarm.
+
+### Seeing it in action
+
+`supercomputer --demo` simulates heavy load and cycles through every alarm
+about once a minute. It's harmless: nothing is stressed, and the footer reads
+`DEMO: SIMULATED`.
+
+To try real load, run this in another terminal. It keeps every core busy
+for 45 seconds at the lowest priority, so real work still comes first. The
+all-cores-saturated alarm fires after 30 seconds:
+
+```sh
+n=$(getconf _NPROCESSORS_ONLN); for i in $(seq $n); do nice -n 19 yes >/dev/null & done; sleep 45; kill $(jobs -p)
+```
+
+Reading a large file (`cat bigfile > /dev/null`) lights the storage lamps.
 
 ### Background checks
 
