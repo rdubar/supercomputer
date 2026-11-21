@@ -129,11 +129,71 @@ cheap to run on a timer. Add `--notify` for a desktop notification
 (`osascript` on macOS, `notify-send` on Linux). It notifies only when the set
 of alarms changes, not on every run, and remembers the last state in
 `~/.cache/supercomputer/alarms`. Add `--quiet` to print nothing while all is
-well. For example, a crontab line:
+well (with `--notify`, also while nothing has changed). For example, a crontab line:
 
 ```
 */5 * * * * /usr/bin/python3 /path/to/supercomputer.py --check --notify --quiet
 ```
+
+#### macOS: launchd agent
+
+Save as `~/Library/LaunchAgents/com.github.rdubar.supercomputer.check.plist`,
+changing the script path to your clone:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.github.rdubar.supercomputer.check</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>/Users/YOU/dev/supercomputer/supercomputer.py</string>
+    <string>--check</string><string>--notify</string><string>--quiet</string>
+  </array>
+  <key>StartInterval</key><integer>300</integer>
+  <key>RunAtLoad</key><true/>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/supercomputer-check.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/supercomputer-check.log</string>
+</dict>
+</plist>
+```
+
+```sh
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.github.rdubar.supercomputer.check.plist
+# to remove:
+launchctl bootout gui/$(id -u)/com.github.rdubar.supercomputer.check
+```
+
+Notifications come from `osascript`, so macOS shows them as coming from
+Script Editor. If none appear, allow Script Editor in System Settings →
+Notifications.
+
+#### Why background checks run only on the Mac (for now)
+
+The author's setup uses the background check on the MacBook only. The
+Raspberry Pi media server deliberately doesn't run it:
+
+- **No one would see the notification.** The Pi runs headless, with a
+  desktop only over VNC, and has no notification tool installed. A
+  background check there could only write a log that nobody reads.
+- **Pi alarms already appear where they will be noticed.** The SSH login
+  banner runs the same checks on every login, and the console shows them
+  live.
+- **The Pi is a production server.** The project's rule from day one was
+  "without breaking anything": read-only, unprivileged and nothing running
+  in the background. A scheduled job is a permanent addition, so it is added
+  only where it clearly pays its way.
+- **The Mac is where strain actually happens.** An 8 GB laptop with a
+  nearly full disk and heavy swap benefits from a nudge. Its first
+  background run flagged a 96% full disk.
+
+The obvious next step for the Pi is to send alarms somewhere you'll see
+them, such as a push notification or email, rather than a local log. Until
+then it stays alarm-on-login only.
 
 ### Login banner
 

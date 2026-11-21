@@ -941,7 +941,11 @@ def check(probe, do_notify=False, quiet=False):
     busy = [1 - (cpu1[k][1] - cpu0[k][1]) / max(cpu1[k][0] - cpu0[k][0], 1) for k in cpu1 if k in cpu0]
     alarms = assess(probe, swap_rate, bool(busy) and min(busy) > 0.98)
     host = identity(probe)[0]
-    if not (quiet and not alarms):
+    keys = sorted(k for _, k, _ in alarms)
+    before = read(STATE_FILE).split()
+    changed = keys != before
+    # --quiet: silent when nominal; with --notify, also silent while unchanged
+    if not quiet or (alarms and not do_notify) or (do_notify and changed):
         A, R = ("\033[1;33m", "\033[0m") if sys.stdout.isatty() else ("", "")
         lines = alarm_lines(alarms, A, R)
         if not sys.stdout.isatty():
@@ -949,9 +953,7 @@ def check(probe, do_notify=False, quiet=False):
         print(f"{host} · SUPERCOMPUTER V{__version__} STATUS CHECK {time.strftime('%Y-%m-%d %H:%M:%S')}")
         print("\n".join(lines))
     if do_notify:
-        keys = sorted(k for _, k, _ in alarms)
-        before = read(STATE_FILE).split()
-        if keys != before:
+        if changed:
             new = [t for _, k, t in alarms if k not in before]
             if new:
                 notify(f"{host} SUPERCOMPUTER ALARM", "; ".join(new))
